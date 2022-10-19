@@ -4,6 +4,7 @@
 
 // SPI SDCard support for LiteX's SPIMaster (limited to ver2.00+ SDCards).
 
+#include <stdbool.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -27,6 +28,10 @@
 #ifndef SPISDCARD_CLK_FREQ
 #define SPISDCARD_CLK_FREQ 20000000
 #endif
+
+#define SPISDCARD_BLKSZ 512
+
+static bool spisdcard_hc = false;
 
 /*-----------------------------------------------------------------------*/
 /* Helpers                                                               */
@@ -110,14 +115,28 @@ static int spisdcard_select(void) {
 
 static void spisdcardwrite_bytes(uint8_t* buf, uint16_t n) {
     uint16_t i;
-    for (i=0; i<n; i++)
+    for (i=0; i<n; i++) {
+
+#if 0
+#ifdef SPISDCARD_DEBUG
+        printf("%s:%d, write 0x%x - 0x%02x\n", __func__, __LINE__, i, buf[i]);
+#endif
+#endif
         spi_xfer(buf[i]);
+    }
 }
 
 static void spisdcardread_bytes(uint8_t* buf, uint16_t n) {
     uint16_t i;
-    for (i=0; i<n; i++)
+    for (i=0; i<n; i++) {
         buf[i] = spi_xfer(0xff);
+
+#if 0
+#ifdef SPISDCARD_DEBUG
+        printf("%s:%d, read 0x%x - 0x%02x\n", __func__, __LINE__, i, buf[i]);
+#endif
+#endif
+    }
 }
 
 /*-----------------------------------------------------------------------*/
@@ -144,7 +163,12 @@ static uint8_t spisdcardreceive_block(uint8_t *buf) {
     for (i=0; i<512; i++) {
         spisdcard_control_write(8*SPI_LENGTH | SPI_START);
         while (spisdcard_status_read() != SPI_DONE);
-        *buf++ = spisdcard_miso_read();
+        buf[i] = spisdcard_miso_read();
+#if 0
+#ifdef SPISDCARD_DEBUG
+        printf("%s:%d, block byte %x - %02x\n", __func__, __LINE__, (unsigned) i, (unsigned) buf[i]);
+#endif
+#endif
     }
 
     /* Discard CRC */
@@ -163,6 +187,12 @@ static uint8_t spisdcardsend_cmd(uint8_t cmd, uint32_t arg)
     uint8_t byte;
     uint8_t buf[6];
     uint8_t timeout;
+
+#if 0
+#ifdef SPISDCARD_DEBUG
+    printf("%s:%d, cmd %d, arg %x\n", __func__, __LINE__, (unsigned) cmd, (unsigned) arg);
+#endif
+#endif
 
     /* Send CMD55 for ACMD */
     if (cmd & 0x80) {
@@ -192,6 +222,8 @@ static uint8_t spisdcardsend_cmd(uint8_t cmd, uint32_t arg)
         buf[5] = 0x95;      /* Valid CRC for CMD0 */
     else if (cmd == CMD8)
         buf[5] = 0x87;      /* Valid CRC for CMD8 (0x1AA) */
+    else if (cmd == CMD16)
+        buf[5] = 0x81;      /* Valid CRC for CMD16 + 512) */
     else
         buf[5] = 0x01;      /* Dummy CRC + Stop */
     spisdcardwrite_bytes(buf, 6);
@@ -218,6 +250,10 @@ uint8_t spisdcard_init(void) {
     uint8_t  i;
     uint8_t  buf[4];
     uint16_t timeout;
+
+#ifdef SPISDCARD_DEBUG
+    printf("%s:%d\n", __func__, __LINE__);
+#endif
 
     /* Set SPI clk freq to initialization frequency */
     spi_set_clk_freq(SPISDCARD_CLK_FREQ_INIT);
@@ -255,6 +291,10 @@ uint8_t spisdcard_init(void) {
     if (timeout == 0)
         return 0;
 
+    /* Set block size*/
+    //if (spisdcardsend_cmd(CMD16, 512) != 0x1)
+    //    return 0;
+
     /* Set SPI clk freq to operational frequency */
     spi_set_clk_freq(SPISDCARD_CLK_FREQ);
 
@@ -283,11 +323,19 @@ static DSTATUS spisd_disk_initialize(BYTE drv) {
 
 static DRESULT spisd_disk_read(BYTE drv, BYTE *buf, LBA_t block, UINT count) {
     uint8_t cmd;
+    uint32_t offset;
+
+    /*
+     * For low capacity cards the offset is absolute,
+     * for high capacity cards the offset is the number of blocks.
+     */
+    offset = spisdcard_hc ? block : block * SPISDCARD_BLKSZ;
+
     if (count > 1)
         cmd = CMD18; /* READ_MULTIPLE_BLOCK */
     else
         cmd = CMD17; /* READ_SINGLE_BLOCK */
-    if (spisdcardsend_cmd(cmd, block) == 0) {
+    if (spisdcardsend_cmd(cmd, offset) == 0) {
         while(count > 0) {
             if (spisdcardreceive_block(buf) == 0)
                 break;
